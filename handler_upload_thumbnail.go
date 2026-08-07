@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"os"
@@ -76,7 +78,16 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	filePath := fmt.Sprintf("%s/%s%s", cfg.assetsRoot, videoID.String(), fileExtension)
+	bytes := make([]byte, 32)
+	_, err = rand.Read(bytes)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't generate random bytes", err)
+		return
+	}
+
+	fileName := base64.RawURLEncoding.EncodeToString(bytes) + fileExtension
+
+	filePath := fmt.Sprintf("%s/%s", cfg.assetsRoot, fileName)
 
 	// Save locally simulating S3 upload
 	out, err := os.Create(filePath)
@@ -93,7 +104,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 
 	// main go has 	mux.Handle("/assets/", cacheMiddleware(assetsHandler))
-	thumbnailURL := fmt.Sprintf("/assets/%s%s", videoID.String(), fileExtension)
+	thumbnailURL := fmt.Sprintf("/assets/%s", fileName)
 	video.ThumbnailURL = &thumbnailURL
 
 	err = cfg.db.UpdateVideo(video)
