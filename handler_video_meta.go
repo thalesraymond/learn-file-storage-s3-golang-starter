@@ -3,11 +3,29 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/google/uuid"
 )
+
+func absoluteMediaURL(r *http.Request, mediaURL *string) *string {
+	if mediaURL == nil {
+		return nil
+	}
+
+	if strings.HasPrefix(*mediaURL, "http://") || strings.HasPrefix(*mediaURL, "https://") {
+		return mediaURL
+	}
+
+	if strings.HasPrefix(*mediaURL, "/") {
+		absolute := "http://" + r.Host + *mediaURL
+		return &absolute
+	}
+
+	return mediaURL
+}
 
 func (cfg *apiConfig) handlerVideoMetaCreate(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
@@ -95,6 +113,9 @@ func (cfg *apiConfig) handlerVideoGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	video.ThumbnailURL = absoluteMediaURL(r, video.ThumbnailURL)
+	video.VideoURL = absoluteMediaURL(r, video.VideoURL)
+
 	respondWithJSON(w, http.StatusOK, video)
 }
 
@@ -114,6 +135,11 @@ func (cfg *apiConfig) handlerVideosRetrieve(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve videos", err)
 		return
+	}
+
+	for i := range videos {
+		videos[i].ThumbnailURL = absoluteMediaURL(r, videos[i].ThumbnailURL)
+		videos[i].VideoURL = absoluteMediaURL(r, videos[i].VideoURL)
 	}
 
 	respondWithJSON(w, http.StatusOK, videos)
