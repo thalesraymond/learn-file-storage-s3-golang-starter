@@ -85,6 +85,7 @@ func main() {
 		log.Fatal("PORT environment variable is not set")
 	}
 
+	//awsConfig, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(s3Region), config.WithClientLogMode(aws.LogRequestWithBody|aws.LogResponseWithBody))
 	awsConfig, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(s3Region))
 	if err != nil {
 		log.Fatalf("Unable to load AWS SDK config: %v", err)
