@@ -1,19 +1,16 @@
 package main
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"os"
-	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/video"
 	"github.com/google/uuid"
 )
 
@@ -40,13 +37,13 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	video, err := cfg.db.GetVideo(videoID)
+	dbVideo, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't get video from database", err)
 		return
 	}
 
-	if video.UserID != userID {
+	if dbVideo.UserID != userID {
 		respondWithError(w, http.StatusUnauthorized, "You don't have permission to upload a thumbnail for this video", nil)
 		return
 	}
@@ -97,7 +94,13 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	processedVideoPath, err := video.ProcessForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't process video for fast start", err)
+		return
+	}
+
+	aspectRatio, err := video.GetAspectRatio(processedVideoPath)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't get aspect ratio", err)
 		return
@@ -115,10 +118,18 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	_, err = rand.Read(bytes)
 	finalFileName := keyPrefix + "/" + base64.RawURLEncoding.EncodeToString(bytes) + fileExtension
 
+	processedVideoFile, err := os.Open(processedVideoPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't open processed video file", err)
+		return
+	}
+
+	defer processedVideoFile.Close()
+
 	_, err = cfg.s3Config.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &finalFileName,
-		Body:        tempFile,
+		Body:        processedVideoFile,
 		ContentType: &contentType,
 	})
 
@@ -129,54 +140,13 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	videoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, finalFileName)
-	video.VideoURL = &videoURL
+	dbVideo.VideoURL = &videoURL
 
-	err = cfg.db.UpdateVideo(video)
+	err = cfg.db.UpdateVideo(dbVideo)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't update video in database", err)
 		return
 	}
 
-	respondWithJSON(w, http.StatusOK, video)
-}
-
-func getVideoAspectRatio(filePath string) (string, error) {
-	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
-	var out bytes.Buffer
-
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("couldn't run ffprobe: %w", err)
-	}
-
-	var probe struct {
-		Streams []struct {
-			Width  int `json:"width"`
-			Height int `json:"height"`
-		} `json:"streams"`
-	}
-
-	if err := json.Unmarshal(out.Bytes(), &probe); err != nil {
-		return "", fmt.Errorf("couldn't unmarshal ffprobe output: %w", err)
-	}
-
-	if len(probe.Streams) == 0 {
-		return "", fmt.Errorf("no streams found in video")
-	}
-
-	width := probe.Streams[0].Width
-	height := probe.Streams[0].Height
-
-	const tolerance = 0.05
-	ratio := float64(width) / float64(height)
-
-	switch {
-	case math.Abs(ratio-16.0/9.0) < tolerance:
-		return "16:9", nil
-	case math.Abs(ratio-9.0/16.0) < tolerance:
-		return "9:16", nil
-	default:
-		return "other", nil
-	}
+	respondWithJSON(w, http.StatusOK, dbVideo)
 }
