@@ -1,19 +1,12 @@
 package main
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"strings"
-	"time"
 
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
-	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/video"
 	"github.com/google/uuid"
 )
@@ -48,102 +41,56 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	if dbVideo.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "You don't have permission to upload a thumbnail for this video", nil)
+		respondWithError(w, http.StatusUnauthorized, "You don't have permission to upload a video for this video", nil)
 		return
 	}
 
+	// Read the uploaded video file into memory.
 	r.ParseMultipartForm(10 << 30) // 1GB
 	file, _, err := r.FormFile("video")
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Couldn't get video file", err)
 		return
 	}
-
 	defer file.Close()
 
-	fileBytes := make([]byte, 0)
-	buffer := make([]byte, 1024)
-	for {
-		n, err := file.Read(buffer)
-		if err != nil {
-			break
-		}
-		fileBytes = append(fileBytes, buffer[:n]...)
+	fileBytes, err := io.ReadAll(file)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't read video file", err)
+		return
 	}
 
-	fileExtension := ""
 	contentType := http.DetectContentType(fileBytes)
-	switch contentType {
-	case "video/mp4":
-		fileExtension = ".mp4"
-	default:
-		respondWithError(w, http.StatusBadRequest, "Invalid file type", nil)
-		return
-	}
-
-	tempFileName := "upload-" + videoID.String() + "-video" + fileExtension
-	tempFile, err := os.CreateTemp("", tempFileName)
-
-	defer os.Remove(tempFile.Name())
-	defer tempFile.Close()
-
-	if _, err := tempFile.Write(fileBytes); err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't write file to disk", err)
-		return
-	}
-
-	_, err = tempFile.Seek(0, io.SeekStart)
+	fileExtension, err := videoExtension(contentType)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't seek file to beginning", err)
+		respondWithError(w, http.StatusBadRequest, "Invalid file type", err)
 		return
 	}
 
-	processedVideoPath, err := video.ProcessForFastStart(tempFile.Name())
+	// Prepare the video for streaming and pick an S3 key prefix based on its
+	// aspect ratio.
+	processedVideoPath, keyPrefix, err := processVideoForUpload(fileBytes, fileExtension)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't process video for fast start", err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't process video", err)
 		return
 	}
-
-	aspectRatio, err := video.GetAspectRatio(processedVideoPath)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't get aspect ratio", err)
-		return
-	}
-
-	keyPrefix := "other"
-	switch aspectRatio {
-	case "16:9":
-		keyPrefix = "landscape"
-	case "9:16":
-		keyPrefix = "portrait"
-	}
-
-	bytes := make([]byte, 32)
-	_, err = rand.Read(bytes)
-	finalFileName := keyPrefix + "/" + base64.RawURLEncoding.EncodeToString(bytes) + fileExtension
+	defer os.Remove(processedVideoPath)
 
 	processedVideoFile, err := os.Open(processedVideoPath)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't open processed video file", err)
 		return
 	}
-
 	defer processedVideoFile.Close()
 
-	_, err = cfg.s3Config.PutObject(r.Context(), &s3.PutObjectInput{
-		Bucket:      &cfg.s3Bucket,
-		Key:         &finalFileName,
-		Body:        processedVideoFile,
-		ContentType: &contentType,
-	})
-
+	// Store the video in S3 and save its reference in the database.
+	videoURL, err := cfg.uploadVideoToS3(r.Context(), processedVideoFile, contentType, keyPrefix, fileExtension)
 	if err != nil {
 		fmt.Println(err)
 		respondWithError(w, http.StatusInternalServerError, "Couldn't upload file to S3", err)
 		return
 	}
 
-	videoURL := fmt.Sprintf("%s,%s", cfg.s3Bucket, finalFileName)
 	dbVideo.VideoURL = &videoURL
 
 	err = cfg.db.UpdateVideo(dbVideo)
@@ -161,28 +108,54 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	respondWithJSON(w, http.StatusOK, signedURLVideo)
 }
 
-func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (string, error) {
-	psClient := s3.NewPresignClient(s3Client)
-	req, err := psClient.PresignGetObject(context.TODO(), &s3.GetObjectInput{
-		Bucket: &bucket,
-		Key:    &key,
-	}, s3.WithPresignExpires(expireTime))
-	if err != nil {
-		return "", err
+// videoExtension returns the file extension for the given content type.
+func videoExtension(contentType string) (string, error) {
+	switch contentType {
+	case "video/mp4":
+		return ".mp4", nil
+	default:
+		return "", fmt.Errorf("unsupported content type: %s", contentType)
 	}
-
-	return req.URL, nil
 }
 
-func (cfg *apiConfig) dbVideoToSignedVideo(video *database.Video) (database.Video, error) {
-	data := strings.Split(*video.VideoURL, ",")
-
-	signedURL, err := generatePresignedURL(cfg.s3Config, data[0], data[1], 15*time.Minute)
+// processVideoForUpload writes the uploaded bytes to a temporary file, runs
+// the fast-start processing, and returns the path to the processed file along
+// with the S3 key prefix determined by the video's aspect ratio.
+func processVideoForUpload(fileBytes []byte, fileExtension string) (string, string, error) {
+	tempFile, err := os.CreateTemp("", "upload-*-video"+fileExtension)
 	if err != nil {
-		fmt.Println("Error generating presigned URL:", err)
-		return database.Video{}, err
+		return "", "", fmt.Errorf("couldn't create temp file: %w", err)
+	}
+	defer os.Remove(tempFile.Name())
+	defer tempFile.Close()
+
+	if _, err := tempFile.Write(fileBytes); err != nil {
+		return "", "", fmt.Errorf("couldn't write file to disk: %w", err)
 	}
 
-	video.VideoURL = &signedURL
-	return *video, nil
+	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
+		return "", "", fmt.Errorf("couldn't seek file to beginning: %w", err)
+	}
+
+	processedPath, err := video.ProcessForFastStart(tempFile.Name())
+	if err != nil {
+		return "", "", fmt.Errorf("couldn't process video for fast start: %w", err)
+	}
+
+	aspectRatio, err := video.GetAspectRatio(processedPath)
+	if err != nil {
+		return "", "", fmt.Errorf("couldn't get aspect ratio: %w", err)
+	}
+
+	var keyPrefix string
+	switch aspectRatio {
+	case "16:9":
+		keyPrefix = "landscape"
+	case "9:16":
+		keyPrefix = "portrait"
+	default:
+		keyPrefix = "other"
+	}
+
+	return processedPath, keyPrefix, nil
 }
