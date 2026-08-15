@@ -114,7 +114,12 @@ func (cfg *apiConfig) handlerVideoGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	video.ThumbnailURL = absoluteMediaURL(r, video.ThumbnailURL)
-	video.VideoURL = absoluteMediaURL(r, video.VideoURL)
+	signedURLVideo, err := cfg.dbVideoToSignedVideo(&video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't generate signed URL for video", err)
+		return
+	}
+	video.VideoURL = absoluteMediaURL(r, signedURLVideo.VideoURL)
 
 	respondWithJSON(w, http.StatusOK, video)
 }
@@ -139,7 +144,12 @@ func (cfg *apiConfig) handlerVideosRetrieve(w http.ResponseWriter, r *http.Reque
 
 	for i := range videos {
 		videos[i].ThumbnailURL = absoluteMediaURL(r, videos[i].ThumbnailURL)
-		videos[i].VideoURL = absoluteMediaURL(r, videos[i].VideoURL)
+		signedURLVideo, err := cfg.dbVideoToSignedVideo(&videos[i])
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Couldn't generate signed URL for video", err)
+			return
+		}
+		videos[i].VideoURL = absoluteMediaURL(r, signedURLVideo.VideoURL)
 	}
 
 	respondWithJSON(w, http.StatusOK, videos)
