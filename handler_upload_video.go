@@ -99,13 +99,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	signedURLVideo, err := cfg.dbVideoToSignedVideo(&dbVideo)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't generate signed URL for video", err)
-		return
-	}
-	fmt.Print(signedURLVideo.VideoURL)
-	respondWithJSON(w, http.StatusOK, signedURLVideo)
+	respondWithJSON(w, http.StatusOK, dbVideo)
 }
 
 // videoExtension returns the file extension for the given content type.

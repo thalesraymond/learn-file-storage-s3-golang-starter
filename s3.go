@@ -6,15 +6,12 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 )
 
 // uploadVideoToS3 stores the video in S3 under a random key with the given
-// prefix and returns the "bucket,key" reference used by the database.
+// prefix and returns the CloudFront URL for the object.
 func (cfg *apiConfig) uploadVideoToS3(ctx context.Context, video io.Reader, contentType, keyPrefix, fileExtension string) (string, error) {
 	key, err := randomObjectKey(keyPrefix, fileExtension)
 	if err != nil {
@@ -31,7 +28,7 @@ func (cfg *apiConfig) uploadVideoToS3(ctx context.Context, video io.Reader, cont
 		return "", fmt.Errorf("couldn't upload file to S3: %w", err)
 	}
 
-	return fmt.Sprintf("%s,%s", cfg.s3Bucket, key), nil
+	return fmt.Sprintf("https://%s.cloudfront.net/%s", cfg.s3CfDistribution, key), nil
 }
 
 // randomObjectKey returns a random object key under keyPrefix with the given
@@ -43,26 +40,4 @@ func randomObjectKey(keyPrefix, fileExtension string) (string, error) {
 	}
 
 	return keyPrefix + "/" + base64.RawURLEncoding.EncodeToString(bytes) + fileExtension, nil
-}
-
-// dbVideoToSignedVideo replaces the stored "bucket,key" video reference with
-// a short-lived presigned URL so the client can fetch the video directly.
-func (cfg *apiConfig) dbVideoToSignedVideo(video *database.Video) (database.Video, error) {
-	bucket, key, found := strings.Cut(*video.VideoURL, ",")
-	if !found {
-		return database.Video{}, fmt.Errorf("invalid video URL: %s", *video.VideoURL)
-	}
-
-	psClient := s3.NewPresignClient(cfg.s3Config)
-	req, err := psClient.PresignGetObject(context.TODO(), &s3.GetObjectInput{
-		Bucket: &bucket,
-		Key:    &key,
-	}, s3.WithPresignExpires(15*time.Minute))
-	if err != nil {
-		fmt.Println("Error generating presigned URL:", err)
-		return database.Video{}, err
-	}
-
-	video.VideoURL = &req.URL
-	return *video, nil
 }
